@@ -135,6 +135,7 @@ jobs:
       - name: Build binaries in Termux aarch64 container
         run: |
           mkdir -p dist
+          chmod 777 dist
           docker run --rm --privileged \
             -v "$PWD:/work" -w /work \
             termux/termux-docker:aarch64 \
