@@ -138,28 +138,7 @@ jobs:
           docker run --rm --privileged \
             -v "$PWD:/work" -w /work \
             termux/termux-docker:aarch64 \
-            /bin/bash -c '
-              set -e
-              pkg update -y >/dev/null
-              pkg install -y python clang nuitka patchelf binutils >/dev/null
-              for s in resign.py mklogo.py core.py; do
-                n="${s%.py}"
-                echo "::group::Building $n"
-                python -m nuitka \
-                  --standalone \
-                  --onefile \
-                  --output-filename="${n}-android-aarch64" \
-                  --output-dir=/work/dist \
-                  --assume-yes-for-downloads \
-                  --verbose \
-                  --verbose-output="/work/dist/nuitka-build-${n}.log" \
-                  --onefile-no-compression \
-                  --static-libpython=yes \
-                  --remove-output \
-                  "/work/${s}"
-                echo "::endgroup::"
-              done
-            '
+            sh .github/scripts/build-android-inner.sh
 
       - name: Smoke test
         run: |
