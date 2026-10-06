@@ -329,6 +329,333 @@ def bmp_read(path):
     return w, h, bytes(rgba)
 
 
+# ---------------- pure-Python image decoders (RGB) ----
+# Fallback for when Pillow is unavailable (e.g. onefile on Android, where the
+# PIL C extensions cannot find their bundled .so deps). Return (w, h, rgb).
+# Adapted from img2png.py; ASCII-only.
+
+_ZIG = [0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,
+       21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63]
+
+
+def _dec_jpeg(d):
+    qt = {}; huff = {}; sof = None; pos = 2
+    while pos < len(d) - 1:
+        if d[pos] != 0xFF:
+            pos += 1; continue
+        while pos < len(d) and d[pos] == 0xFF: pos += 1
+        if pos >= len(d): break
+        m = d[pos]; pos += 1
+        if m == 0xD8 or m == 0x01 or 0xD0 <= m <= 0xD7: continue
+        if m == 0xD9: break
+        ln = struct.unpack_from('>H', d, pos)[0]
+        seg = d[pos+2:pos+ln]
+        if m == 0xDB:
+            i = 0
+            while i < len(seg):
+                pq = seg[i] >> 4; tq = seg[i] & 15; i += 1
+                t = [0]*64
+                for k in range(64):
+                    if pq: t[k] = struct.unpack_from('>H', seg, i)[0]; i += 2
+                    else:  t[k] = seg[i]; i += 1
+                qt[tq] = t
+        elif m == 0xC4:
+            i = 0
+            while i < len(seg):
+                tc = seg[i] >> 4; th = seg[i] & 15; i += 1
+                cnts = list(seg[i:i+16]); i += 16
+                syms = list(seg[i:i+sum(cnts)]); i += sum(cnts)
+                tbl = {}; code = 0; p = 0
+                for L in range(16):
+                    for _ in range(cnts[L]):
+                        tbl[(L+1, code)] = syms[p]; p += 1; code += 1
+                    code <<= 1
+                huff[(tc, th)] = tbl
+        elif m in (0xC0, 0xC1, 0xC2, 0xC3):
+            if m != 0xC0:
+                raise ValueError('progressive/other JPEG not supported (not baseline)')
+            hh = struct.unpack_from('>H', seg, 1)[0]; ww = struct.unpack_from('>H', seg, 3)[0]
+            nc = seg[5]; comps = []
+            for k in range(nc):
+                cid = seg[6+k*3]; hv = seg[7+k*3]; tq = seg[8+k*3]
+                comps.append([cid, hv >> 4, hv & 15, 0, 0, tq, 0])
+            sof = [ww, hh, comps]
+        elif m == 0xDA:
+            if sof is None: raise ValueError('JPEG missing SOF')
+            ns = seg[0]; sel = {}
+            for k in range(ns):
+                sel[seg[1+k*2]] = (seg[2+k*2] >> 4, seg[2+k*2] & 15)
+            for c in sof[2]:
+                dc, ac = sel.get(c[0], (0, 0)); c[3] = dc; c[4] = ac
+            data = d[pos+ln:]
+            e = data.find(b'\xff\xd9')
+            if e >= 0: data = data[:e]
+            return _jpeg_scan(data, qt, huff, sof)
+        pos += ln
+    raise ValueError('JPEG parse failed')
+
+
+def _jpeg_scan(data, qt, huff, sof):
+    import math
+    W, H, comps = sof
+    hmax = max(c[1] for c in comps); vmax = max(c[2] for c in comps)
+    mcux = (W + 8*hmax - 1)//(8*hmax); mcuy = (H + 8*vmax - 1)//(8*vmax)
+    planes = [bytearray(mcux*c[1]*8 * (mcuy*c[2]*8)) for c in comps]
+    bi = [0]; bc = [0]; bn = [0]
+    def bit():
+        if bn[0] == 0:
+            if bi[0] >= len(data): return 0
+            v = data[bi[0]]; bi[0] += 1
+            if v == 0xFF:
+                nx = data[bi[0]] if bi[0] < len(data) else 0
+                if nx == 0: bi[0] += 1
+                else: return 0
+            bc[0] = v; bn[0] = 8
+        bn[0] -= 1
+        return (bc[0] >> bn[0]) & 1
+    def nbits(n):
+        v = 0
+        for _ in range(n): v = (v << 1) | bit()
+        return v
+    def hdec(t):
+        code = 0
+        for L in range(1, 17):
+            code = (code << 1) | bit()
+            x = t.get((L, code))
+            if x is not None: return x
+        return 0
+    def ext(v, n): return v - (1 << n) + 1 if (n and v < (1 << (n-1))) else v
+    C = [[math.cos((2*x+1)*u*math.pi/16) * (0.35355339059327373 if u == 0 else 0.5)
+          for u in range(8)] for x in range(8)]
+    def idct(blk):
+        tmp = [0.0]*64
+        for u in range(8):
+            for y in range(8):
+                cy = C[y]; s = 0.0
+                for v in range(8): s += cy[v]*blk[v*8+u]
+                tmp[u*8+y] = s
+        o = [0.0]*64
+        for y in range(8):
+            for x in range(8):
+                cx = C[x]; s = 0.0
+                for u in range(8): s += cx[u]*tmp[u*8+y]
+                o[y*8+x] = s
+        return o
+    _cache = {}
+    dcT = []; acT = []
+    for c in comps:
+        t1 = huff.get((0, c[3])); t2 = huff.get((1, c[4]))
+        if not t1: raise ValueError('missing DC huffman table %d' % c[3])
+        if not t2: raise ValueError('missing AC huffman table %d' % c[4])
+        dcT.append(t1); acT.append(t2)
+    for my in range(mcuy):
+        for mx in range(mcux):
+            for ci, c in enumerate(comps):
+                q = qt.get(c[5])
+                if q is None: raise ValueError('missing quant table %d' % c[5])
+                bw = mcux*c[1]*8
+                for by in range(c[2]):
+                    for bx in range(c[1]):
+                        t = hdec(dcT[ci]); diff = ext(nbits(t), t) if t else 0
+                        c[6] += diff
+                        blk = [0]*64; blk[0] = c[6]*q[0]
+                        k = 1
+                        while k < 64:
+                            rs = hdec(acT[ci]); r = rs >> 4; s = rs & 15
+                            if s == 0:
+                                if r == 15: k += 16; continue
+                                break
+                            k += r
+                            if k > 63: break
+                            blk[ZIG[k]] = ext(nbits(s), s)*q[k]; k += 1
+                        key = tuple(blk)
+                        px = _cache.get(key)
+                        if px is None:
+                            px = idct(blk); _cache[key] = px
+                        x0 = (mx*c[1]+bx)*8; y0 = (my*c[2]+by)*8
+                        pl = planes[ci]
+                        for yy in range(8):
+                            base = (y0+yy)*bw + x0
+                            for xx in range(8):
+                                v = int(px[yy*8+xx] + 128.5)
+                                pl[base+xx] = 0 if v < 0 else (255 if v > 255 else v)
+    def up_h(p, bw, bh, r):
+        fw = bw*r
+        o = bytearray(fw*bh)
+        for y in range(bh):
+            b = y*bw
+            for x in range(bw):
+                v = p[b+x]
+                l = p[b+x-1] if x > 0 else v
+                rr = p[b+x+1] if x+1 < bw else v
+                for k in range(r):
+                    w2 = (k*2+1)
+                    o[y*fw + x*r + k] = (v*(2*r-w2) + (l if k < r/2 else rr)*w2 + r) // (2*r)
+        return o, fw
+    def up_v(p, bw, bh, r):
+        fh = bh*r
+        o = bytearray(bw*fh)
+        for x in range(bw):
+            for y in range(bh):
+                v = p[y*bw+x]
+                u = p[(y-1)*bw+x] if y > 0 else v
+                d = p[(y+1)*bw+x] if y+1 < bh else v
+                for k in range(r):
+                    w2 = (k*2+1)
+                    o[(y*r+k)*bw + x] = (v*(2*r-w2) + (u if k < r/2 else d)*w2 + r) // (2*r)
+        return o, fh
+    full = []
+    for ci, c in enumerate(comps):
+        bw = mcux*c[1]*8; bh = mcuy*c[2]*8
+        p = bytes(planes[ci])
+        fw, fh = bw, bh
+        if c[1] < hmax:
+            r = hmax // c[1]
+            p, fw = up_h(p, bw, bh, r)
+        if c[2] < vmax:
+            r = vmax // c[2]
+            p, fh = up_v(p, fw, bh, r)
+        if fw == bw and fh == bh:
+            full.append(bytes(planes[ci]))
+        else:
+            full.append(p)
+    fw = mcux*hmax*8
+    out = bytearray(W*H*3)
+    for y in range(H):
+        for x in range(W):
+            vals = []
+            for ci, c in enumerate(comps):
+                vals.append(full[ci][y*fw+x])
+            if len(vals) == 1:
+                r = g = b = vals[0]
+            elif len(vals) >= 3:
+                Y = vals[0]; Cb = vals[1]-128; Cr = vals[2]-128
+                r = Y + 1.402*Cr; g = Y - 0.344136*Cb - 0.714136*Cr; b = Y + 1.772*Cb
+            else:
+                r = g = b = vals[0]
+            o = (y*W+x)*3
+            out[o] = 0 if r < 0 else (255 if r > 255 else int(r))
+            out[o+1] = 0 if g < 0 else (255 if g > 255 else int(g))
+            out[o+2] = 0 if b < 0 else (255 if b > 255 else int(b))
+    return W, H, bytes(out)
+
+
+def _dec_gif(d):
+    w, h = struct.unpack_from('<HH', d, 6)
+    flg = d[10]
+    pos = 13
+    gct = []
+    if flg & 0x80:
+        n = 2 << (flg & 7); gct = [tuple(d[pos+i*3:pos+i*3+3]) for i in range(n)]; pos += n*3
+    out = bytearray(w*h*3)
+    def lzw(p, minc):
+        tbl = [bytes([i]) for i in range(1 << minc)] + [b'', b'']
+        cs = minc+1; prev = None; res = []
+        data = p; acc = 0; nb = 0; i = 0
+        while i < len(data):
+            acc |= data[i] << nb; nb += 8; i += 1
+            while nb >= cs:
+                code = acc & ((1 << cs) - 1); acc >>= cs; nb -= cs
+                if code == (1 << minc): return res
+                if code < len(tbl) and tbl[code]: e = tbl[code]
+                elif prev is not None: e = prev + prev[:1]
+                else: continue
+                res.append(e)
+                if prev is not None:
+                    tbl.append(prev + e[:1])
+                    if len(tbl) == (1 << cs) and cs < 12: cs += 1
+                prev = e
+        return res
+    while pos < len(d):
+        b = d[pos]; pos += 1
+        if b == 0x3B: break
+        if b == 0x21:
+            pos += 1
+            while pos < len(d) and d[pos]: pos += d[pos]+1
+            pos += 1
+        elif b == 0x2C:
+            ix, iy, iw, ih = struct.unpack_from('<HHHH', d, pos); pos += 8
+            lf = d[pos]; pos += 1
+            lct = []
+            if lf & 0x80:
+                n = 2 << (lf & 7); lct = [tuple(d[pos+i*3:pos+i*3+3]) for i in range(n)]; pos += n*3
+            minc = d[pos]; pos += 1
+            sub = b''
+            while pos < len(d) and d[pos]:
+                ln = d[pos]; pos += 1; sub += d[pos:pos+ln]; pos += ln
+            pos += 1
+            pal = lct or gct
+            idx = lzw(sub, minc)
+            for y in range(ih):
+                for x in range(iw):
+                    k = y*iw+x
+                    if k >= len(idx): break
+                    c = idx[k][0] if idx[k] else 0
+                    if c >= len(pal): r=g=b=0
+                    else: r,g,b = pal[c]
+                    px, py = ix+x, iy+y
+                    if px < w and py < h:
+                        o = (py*w+px)*3; out[o],out[o+1],out[o+2] = r,g,b
+    return w, h, bytes(out)
+
+
+def _dec_tga(d):
+    idl, cmap, typ = d[0], d[1], d[2]
+    w, h = struct.unpack_from('<HH', d, 12)
+    bpp = d[16]
+    pos = 18 + idl
+    out = bytearray(w*h*3)
+    step = 4 if bpp == 32 else 3
+    for y in range(h):
+        for x in range(w):
+            p = pos + (y*w+x)*step
+            if p+step > len(d): break
+            o = ((h-1-y)*w+x)*3
+            out[o] = d[p+2]; out[o+1] = d[p+1]; out[o+2] = d[p]
+    return w, h, bytes(out)
+
+
+def _dec_pnm(d):
+    toks = []; i = 0
+    while len(toks) < 4 and i < len(d):
+        while i < len(d) and d[i:i+1].isspace(): i += 1
+        if d[i:i+1] == b'#':
+            while i < len(d) and d[i:i+1] != b'\n': i += 1
+            continue
+        j = i
+        while j < len(d) and not d[j:j+1].isspace(): j += 1
+        toks.append(d[i:j]); i = j
+    i += 1
+    magic = toks[0]; w = int(toks[1]); h = int(toks[2])
+    out = bytearray(w*h*3)
+    if magic == b'P6':
+        out[:] = d[i:i+w*h*3]
+    elif magic == b'P5':
+        for k in range(w*h):
+            v = d[i+k]; out[k*3]=out[k*3+1]=out[k*3+2]=v
+    else: raise ValueError('PNM format not supported')
+    return w, h, bytes(out)
+
+
+def _sniff(head):
+    if head[:8] == b'\x89PNG\r\n\x1a\n': return 'png'
+    if head[:2] == b'BM': return 'bmp'
+    if head[:3] == b'GIF': return 'gif'
+    if head[:2] == b'\xff\xd8': return 'jpg'
+    if head[:2] in (b'P1', b'P4', b'P2', b'P3', b'P5', b'P6'): return 'pnm'
+    return 'tga'
+
+
+def _rgb_to_rgba(rgb):
+    n = len(rgb) // 3
+    out = bytearray(n * 4)
+    out[0::4] = rgb[0::3]
+    out[1::4] = rgb[1::3]
+    out[2::4] = rgb[2::3]
+    out[3::4] = b'\xff' * n
+    return bytes(out)
+
+
 # ---------------- pixel format conversion ----
 
 def rgba_to_bgra(rgba):
@@ -376,8 +703,10 @@ def _load_via_convert(path):
 
 
 def load_image(path):
-    """Load an image as (w, h, rgba_bytes). PNG/BMP are decoded internally;
-       other formats require Pillow or ImageMagick `convert`/`identify`.
+    """Load an image as (w, h, rgba_bytes). Pillow first (best, most formats);
+       on any failure (e.g. PIL C extensions can't find their .so deps in an
+       onefile on Android), fall back to pure-Python decoders for
+       PNG/BMP/JPG/GIF/TGA/PNM; finally try ImageMagick convert/identify.
        Results are cached per path."""
     if path in _DECODE_CACHE:
         return _DECODE_CACHE[path]
@@ -386,21 +715,41 @@ def load_image(path):
         from PIL import Image
         im = Image.open(path).convert('RGBA')
         result = (im.width, im.height, im.tobytes())
-    except ImportError:
+    except Exception:
         pass
     if result is None and shutil.which('convert') and shutil.which('identify'):
-        result = _load_via_convert(path)
+        try:
+            result = _load_via_convert(path)
+        except Exception:
+            pass
     if result is None:
-        with open(path, 'rb') as f:
-            head = f.read(8)
-        if head[:8] == b'\x89PNG\r\n\x1a\n':
-            result = png_read(path)
-        elif head[:2] == b'BM':
-            result = bmp_read(path)
+        try:
+            with open(path, 'rb') as f:
+                head = f.read(8)
+            kind = _sniff(head)
+            if kind == 'png':
+                w, h, rgba = png_read(path)
+                result = (w, h, rgba)
+            elif kind == 'bmp':
+                w, h, rgba = bmp_read(path)
+                result = (w, h, rgba)
+            else:
+                data = open(path, 'rb').read()
+                if kind == 'jpg':
+                    w, h, rgb = _dec_jpeg(data)
+                elif kind == 'gif':
+                    w, h, rgb = _dec_gif(data)
+                elif kind == 'tga':
+                    w, h, rgb = _dec_tga(data)
+                elif kind == 'pnm':
+                    w, h, rgb = _dec_pnm(data)
+                else:
+                    raise ValueError('unknown image format')
+                result = (w, h, _rgb_to_rgba(rgb))
+        except Exception as e:
+            sys.stderr.write('[load_image] %s: %s\n' % (os.path.basename(path), e))
     if result is None:
-        raise ValueError(
-            'cannot decode %s: install Pillow or ImageMagick, or use PNG/BMP'
-            % os.path.basename(path))
+        raise ValueError('cannot decode %s' % os.path.basename(path))
     _DECODE_CACHE[path] = result
     return result
 
