@@ -36,11 +36,8 @@ How the fake cert works (legacy, bypass_mode=1):
 import argparse
 import hashlib
 import os
-import shutil
 import struct
-import subprocess
 import sys
-import tempfile
 import zlib
 from pathlib import Path
 
@@ -330,9 +327,9 @@ def bmp_read(path):
 
 
 # ---------------- pure-Python image decoders (RGB) ----
-# Fallback for when Pillow is unavailable (e.g. onefile on Android, where the
-# PIL C extensions cannot find their bundled .so deps). Return (w, h, rgb).
-# Adapted from img2png.py; ASCII-only.
+# No PIL, no ImageMagick. Pure stdlib so the same code works on Linux and in
+# an Android onefile. Each returns (w, h, rgb); rgba_to_rgba is applied by the
+# caller. Adapted from img2png.py; ASCII-only.
 
 _ZIG = [0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,
        21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63]
@@ -467,7 +464,7 @@ def _jpeg_scan(data, qt, huff, sof):
                                 break
                             k += r
                             if k > 63: break
-                            blk[ZIG[k]] = ext(nbits(s), s)*q[k]; k += 1
+                            blk[_ZIG[k]] = ext(nbits(s), s)*q[k]; k += 1
                         key = tuple(blk)
                         px = _cache.get(key)
                         if px is None:
@@ -677,79 +674,38 @@ def bgra_to_rgba(bgra):
 
 
 # ---------------- multi-format image loading ----
-
-def _load_via_convert(path):
-    """Decode via ImageMagick: identify for size, convert to raw RGBA."""
-    out = subprocess.run(['identify', '-format', '%w %h', path + '[0]'],
-                         capture_output=True, text=True)
-    if out.returncode != 0 or not out.stdout.strip():
-        raise ValueError('identify failed: ' + out.stderr.strip())
-    w, h = map(int, out.stdout.split()[:2])
-    tmp = tempfile.NamedTemporaryFile(suffix='.rgba', delete=False).name
-    try:
-        r = subprocess.run(['convert', path, '-alpha', 'opaque', '-depth', '8',
-                            'RGBA:' + tmp], capture_output=True)
-        if r.returncode != 0:
-            raise ValueError('convert failed: ' + r.stderr.decode('utf-8', 'replace').strip())
-        rgba = open(tmp, 'rb').read()
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-    if len(rgba) != w * h * 4:
-        raise ValueError('convert output size %d != %dx%dx4' % (len(rgba), w, h))
-    return w, h, rgba
-
+# Pure-Python only. No PIL, no ImageMagick. Decodes:
+#   PNG (8-bit RGB/RGBA, non-interlaced), BMP (24/32-bit),
+#   JPEG (baseline DCT, not progressive), GIF (87a/89a, first frame),
+#   TGA (uncompressed 24/32-bit), PNM (P5/P6).
 
 def load_image(path):
-    """Load an image as (w, h, rgba_bytes). Pillow first (best, most formats);
-       on any failure (e.g. PIL C extensions can't find their .so deps in an
-       onefile on Android), fall back to pure-Python decoders for
-       PNG/BMP/JPG/GIF/TGA/PNM; finally try ImageMagick convert/identify.
+    """Load an image as (w, h, rgba_bytes) using pure-Python decoders.
+       Supported: PNG, BMP, JPEG (baseline), GIF, TGA, PNM (P5/P6).
        Results are cached per path."""
     if path in _DECODE_CACHE:
         return _DECODE_CACHE[path]
-    result = None
-    try:
-        from PIL import Image
-        im = Image.open(path).convert('RGBA')
-        result = (im.width, im.height, im.tobytes())
-    except Exception:
-        pass
-    if result is None and shutil.which('convert') and shutil.which('identify'):
-        try:
-            result = _load_via_convert(path)
-        except Exception:
-            pass
-    if result is None:
-        try:
-            with open(path, 'rb') as f:
-                head = f.read(8)
-            kind = _sniff(head)
-            if kind == 'png':
-                w, h, rgba = png_read(path)
-                result = (w, h, rgba)
-            elif kind == 'bmp':
-                w, h, rgba = bmp_read(path)
-                result = (w, h, rgba)
-            else:
-                data = open(path, 'rb').read()
-                if kind == 'jpg':
-                    w, h, rgb = _dec_jpeg(data)
-                elif kind == 'gif':
-                    w, h, rgb = _dec_gif(data)
-                elif kind == 'tga':
-                    w, h, rgb = _dec_tga(data)
-                elif kind == 'pnm':
-                    w, h, rgb = _dec_pnm(data)
-                else:
-                    raise ValueError('unknown image format')
-                result = (w, h, _rgb_to_rgba(rgb))
-        except Exception as e:
-            sys.stderr.write('[load_image] %s: %s\n' % (os.path.basename(path), e))
-    if result is None:
-        raise ValueError('cannot decode %s' % os.path.basename(path))
+    with open(path, 'rb') as f:
+        head = f.read(8)
+    kind = _sniff(head)
+    if kind == 'png':
+        w, h, rgba = png_read(path)
+    elif kind == 'bmp':
+        w, h, rgba = bmp_read(path)
+    else:
+        data = open(path, 'rb').read()
+        if kind == 'jpg':
+            w, h, rgb = _dec_jpeg(data)
+        elif kind == 'gif':
+            w, h, rgb = _dec_gif(data)
+        elif kind == 'tga':
+            w, h, rgb = _dec_tga(data)
+        elif kind == 'pnm':
+            w, h, rgb = _dec_pnm(data)
+        else:
+            raise ValueError('unsupported image format: %s' % os.path.basename(path))
+        rgba = _rgb_to_rgba(rgb)
+    result = (w, h, rgba)
     _DECODE_CACHE[path] = result
     return result
 
@@ -1319,6 +1275,19 @@ def main():
     p = argparse.ArgumentParser(
         prog='core.py',
         description='MTK logo image toolchain: unpack / pack / install / build / verify',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            'supported input image formats (pure Python, no PIL/ImageMagick):\n'
+            '  PNG   8-bit RGB/RGBA, non-interlaced\n'
+            '  BMP   24/32-bit uncompressed\n'
+            '  JPEG  baseline DCT (not progressive)\n'
+            '  GIF   87a/89a, first frame\n'
+            '  TGA   uncompressed 24/32-bit\n'
+            '  PNM   P5 (gray) / P6 (color)\n'
+            '\n'
+            'images not matching a chunk target size are center-cropped\n'
+            'and/or padded with opaque black (no scaling).'
+        ),
     )
     p.add_argument('-V', '--version', action='store_true', help='show version')
     sub = p.add_subparsers(dest='cmd')
@@ -1328,7 +1297,7 @@ def main():
     pu.add_argument('-o', '--out', help='output directory (default <stem>_out)')
     pu.set_defaults(func=cmd_unpack)
 
-    pc = sub.add_parser('pack', help='repack images into a logo image (multi-format, auto fit)')
+    pc = sub.add_parser('pack', help='repack images (PNG/BMP/JPG/GIF/TGA/PNM) into a logo image; auto fit')
     pc.add_argument('dir', help='directory of edited chunks (indexed by filename prefix)')
     pc.add_argument('template', help='original logo image as template')
     pc.add_argument('-o', '--out', help='output file (default <template>.packed)')
