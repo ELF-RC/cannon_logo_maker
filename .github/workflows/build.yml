@@ -109,3 +109,81 @@ jobs:
           name: release-bin-${{ env.BUILD_VERSION }}-${{ matrix.target.arch }}-${{ env.SHANGHAI_TIME }}
           path: stage
           if-no-files-found: error
+
+  build-android:
+    name: ubuntu-22.04-arm / android-aarch64
+    runs-on: ubuntu-22.04-arm
+    # Build Android aarch64 onefile binaries inside a native Termux container.
+    # The aarch64 container matches the aarch64 host, so no QEMU/binfmt_misc is
+    # needed and compilation runs at native speed.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version and Shanghai timestamp
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="dev-$(echo "${GITHUB_SHA}" | cut -c1-8)"
+          fi
+          SHANGHAI_TIME="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
+          echo "BUILD_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "SHANGHAI_TIME=${SHANGHAI_TIME}" >> "$GITHUB_ENV"
+          echo "version=${VERSION}  shanghai=${SHANGHAI_TIME}"
+
+      - name: Build binaries in Termux aarch64 container
+        run: |
+          mkdir -p dist
+          docker run --rm --privileged \
+            -v "$PWD:/work" -w /work \
+            termux/termux-docker:aarch64 \
+            /bin/bash -c '
+              set -e
+              pkg update -y >/dev/null
+              pkg install -y python clang nuitka patchelf binutils >/dev/null
+              for s in resign.py mklogo.py core.py; do
+                n="${s%.py}"
+                echo "::group::Building $n"
+                python -m nuitka \
+                  --standalone \
+                  --onefile \
+                  --output-filename="${n}-android-aarch64" \
+                  --output-dir=/work/dist \
+                  --assume-yes-for-downloads \
+                  --verbose \
+                  --verbose-output="/work/dist/nuitka-build-${n}.log" \
+                  --onefile-no-compression \
+                  --static-libpython=yes \
+                  --remove-output \
+                  "/work/${s}"
+                echo "::endgroup::"
+              done
+            '
+
+      - name: Smoke test
+        run: |
+          for bin in resign-android-aarch64 mklogo-android-aarch64 core-android-aarch64; do
+            echo "::group::$bin -V"
+            chmod +x "dist/$bin"
+            "./dist/$bin" -V || true
+            echo "::endgroup::"
+          done
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p stage
+          cp dist/resign-android-aarch64 \
+             dist/mklogo-android-aarch64 \
+             dist/core-android-aarch64 \
+             stage/
+          cp dist/nuitka-build-*.log stage/ 2>/dev/null || true
+          echo "--- stage contents ---"
+          ls -la stage/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bin-${{ env.BUILD_VERSION }}-android-aarch64-${{ env.SHANGHAI_TIME }}
+          path: stage
+          if-no-files-found: error
