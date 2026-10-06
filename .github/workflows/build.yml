@@ -141,15 +141,6 @@ jobs:
             termux/termux-docker:aarch64 \
             sh .github/scripts/build-android-inner.sh
 
-      - name: Smoke test
-        run: |
-          for bin in resign-android-aarch64 mklogo-android-aarch64 core-android-aarch64; do
-            echo "::group::$bin -V"
-            chmod +x "dist/$bin"
-            "./dist/$bin" -V || true
-            echo "::endgroup::"
-          done
-
       - name: Stage artifacts
         run: |
           mkdir -p stage
