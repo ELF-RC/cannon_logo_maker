@@ -19,10 +19,11 @@ PREFIX=/data/data/com.termux/files/usr
 echo "deb https://packages.termux.dev/apt/termux-main/ stable main" > "$PREFIX/etc/apt/sources.list"
 
 pkg update -y
-pkg install -y python clang patchelf binutils ldd python-pip termux-elf-cleaner
+pkg install -y python clang patchelf binutils ldd python-pip termux-elf-cleaner \
+    libjpeg-turbo libpng zlib libfreetype libtiff libwebp
 # NOTE: do NOT run "pip install --upgrade pip" here -- Termux forbids it
 # (would break the termux-packaged pip). Use the apt-provided pip as-is.
-python -m pip install nuitka zstandard
+python -m pip install nuitka zstandard Pillow
 
 # Writable build directory inside the container. Use $HOME (the Termux user's
 # home) since both /tmp and the host-mounted /work are not writable here.
@@ -41,6 +42,7 @@ for s in resign.py mklogo.py core.py; do
     python -m nuitka \
         --standalone \
         --onefile \
+        --include-package=PIL \
         --output-filename="${n}-android-aarch64" \
         --output-dir="$BUILD" \
         --assume-yes-for-downloads \
