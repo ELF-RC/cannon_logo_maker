@@ -45,6 +45,7 @@ IMG_TYPE_GROUP_CERT = 0x02 << 24
 
 # Decompressed size -> (width, height). 4 bytes per pixel (BGRA).
 SIZE_MAP = {
+    10368000: (1080, 2400),
     10108800: (1080, 2340),
     249200:   (178, 350),
     49444:    (263, 47),

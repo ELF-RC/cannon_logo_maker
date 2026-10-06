@@ -53,6 +53,7 @@ OID_IMAGE_HEADER_HASH = '2.16.886.2454.2.4'
 
 # Decompressed size -> (width, height). 4 bytes per pixel (BGRA).
 SIZE_MAP = {
+    10368000: (1080, 2400),
     10108800: (1080, 2340),
     249200:   (178, 350),
     49444:    (263, 47),

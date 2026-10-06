@@ -98,6 +98,7 @@ Decompressed size -> (width, height), 4 bytes per pixel (BGRA):
 
 | Bytes | Resolution | Format |
 |---|---|---|
+| 10368000 | 1080x2400 | full-screen frame |
 | 10108800 | 1080x2340 | full-screen frame |
 | 249200 | 178x350 | small image |
 | 49444 | 263x47 | narrow strip |
