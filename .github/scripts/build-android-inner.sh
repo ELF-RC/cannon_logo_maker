@@ -9,7 +9,8 @@ set -e
 # from pip because Termux does not package them in apt.
 pkg update -y
 pkg install -y python clang patchelf binutils python-pip
-python -m pip install --upgrade pip
+# NOTE: do NOT run "pip install --upgrade pip" here -- Termux forbids it
+# (would break the termux-packaged pip). Use the apt-provided pip as-is.
 python -m pip install nuitka zstandard
 
 for s in resign.py mklogo.py core.py; do
