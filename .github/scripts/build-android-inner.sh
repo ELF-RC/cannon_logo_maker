@@ -19,15 +19,17 @@ PREFIX=/data/data/com.termux/files/usr
 echo "deb https://packages.termux.dev/apt/termux-main/ stable main" > "$PREFIX/etc/apt/sources.list"
 
 pkg update -y
-pkg install -y python clang patchelf binutils python-pip termux-elf-cleaner
+pkg install -y python clang patchelf binutils ldd python-pip termux-elf-cleaner
 # NOTE: do NOT run "pip install --upgrade pip" here -- Termux forbids it
 # (would break the termux-packaged pip). Use the apt-provided pip as-is.
 python -m pip install nuitka zstandard
 
 # Writable build directory inside the container. Use $HOME (the Termux user's
 # home) since both /tmp and the host-mounted /work are not writable here.
+# Also cd into it so Nuitka's crash-report.xml lands somewhere writable.
 BUILD="$HOME/build"
 mkdir -p "$BUILD"
+cd "$BUILD"
 
 # Host output directory (mounted from the runner workspace).
 OUT=/work/dist
