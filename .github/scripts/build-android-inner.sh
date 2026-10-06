@@ -5,8 +5,12 @@
 
 set -e
 
+# Native toolchain from Termux apt; Python packages (nuitka, zstandard) come
+# from pip because Termux does not package them in apt.
 pkg update -y
-pkg install -y python clang nuitka patchelf binutils
+pkg install -y python clang patchelf binutils python-pip
+python -m pip install --upgrade pip
+python -m pip install nuitka zstandard
 
 for s in resign.py mklogo.py core.py; do
     n="${s%.py}"
