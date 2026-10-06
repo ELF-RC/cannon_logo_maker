@@ -19,8 +19,9 @@ pkg install -y python clang patchelf binutils python-pip
 # (would break the termux-packaged pip). Use the apt-provided pip as-is.
 python -m pip install nuitka zstandard
 
-# Writable build directory inside the container.
-BUILD=/tmp/build
+# Writable build directory inside the container. Use $HOME (the Termux user's
+# home) since both /tmp and the host-mounted /work are not writable here.
+BUILD="$HOME/build"
 mkdir -p "$BUILD"
 
 # Host output directory (mounted from the runner workspace).
